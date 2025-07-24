@@ -1,0 +1,320 @@
+# Snyk APi & Web Ephemeral Single Target Github Action
+# This action will run Snyk API & Web (SAW) scans on the repository.
+# assumes:
+#    - target/scan config has already been created
+#    - connectivity / name resolution relies on docker
+#    
+# Variables:
+# - Snyk API & Web Environment (in github repo $repo/.github/.snykaw)
+#   + saw_api: defaults to api.probely.com
+#   + saw_target_id: Snyk Web target.
+#   + scan_type: default is incremental
+#   + scan_settings: default is to use existing targat settings
+#
+# - github secrets
+#   + saw_token 
+#
+# - github Context
+#   + target_branch: populated from github context
+#   + target_release: populated from github context
+##
+
+name: probely_ephemeral_tests
+
+on:
+ # push:
+ #   branches: [ "prod", "qa", "dev" ]
+ # pull_request:
+ #   branches: [ "prod", "qa", "dev" ]
+ # release:
+ #   types: [ created ]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to scan'
+        required: true
+        default: 'dev'
+      release:
+        description: 'Release to scan'
+        required: true
+        default: 'latest'
+# Environment variables 
+# setting these specifically to allow for east debugging and compatibility with push/pull/release/workflow_dispatch 
+# environment options.
+env:
+  ## Docker Environment
+  # docker network name used for container configs
+  DOCKER_NETWORK: cicd
+  
+  ## Github references
+  # repo, release, branch, commit info from github env
+  REPO_NAME:  ${{ github.event.repository.name }}                                        
+  RELEASE:  ${{ github.event.release.tag_name }}                                       
+  #BRANCH: ${{ github.context.ref_name }}
+  COMMIT_HASH: ${{ github.sha }}
+  
+  ## Snyk API & Web Environment
+  # APi url, api and agent keys
+  SAW_API_URL: ${{ vars.SAW_API_URL }}                                                     
+  SAW_API_KEY: ${{ secrets.SAW_API_KEY }}                                             
+  SAW_AGENT_KEY: ${{ secrets.SAW_AGENT_KEY }}                                           
+ 
+  ## Snyk APi & Web Target information
+  SAW_TARGET_ID:  ${{ vars.SAW_TARGET_ID }}
+  SAW_TARGET_NAME: ${{ vars.SAW_TARGET_NAME }}
+  ### Should get these from SAW
+  SAW_TARGET_PORT: ${{ vars.SAW_TARGET_PORT }}
+  SAW_TARGET_PROTO: ${{ vars.SAW_TARGET_PROTO }}
+  SAW_TARGET_URL:  "${{ vars.SAW_TARGET_PROTO }}://${{ vars.SAW_TARGET_NAME }}:${{ vars.SAW_TARGET_PORT }}"     
+   
+
+  ## Snyk API & Web optional fields
+  # Not yet implemented - scan type (full, inremental), profile to specify scan profile, CICD_Action=block|info, context & debugging
+  SAW_SCAN_TYPE: ${{ vars.SAW_SCAN_TYPE }}                                                  
+  SAW_SCAN_PROFILE: ${{ vars.SAW_SCAN_PROFILE }}                                            
+  CICD_ACTION: ${{ vars.SAW_CICD_ACTION }}                                              
+  GITHUB_CONTEXT: ${{ toJson(github) }}
+  # GBRANCH: ${{ github.ref) }}
+  DEBUG: ${{ vars.DEBUG }}  
+ 
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+        
+      # Step 1
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Docker
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v2
+
+      # Step 3: Create a custom Docker network
+      - name: Create custom Docker network
+        run: docker network create $DOCKER_NETWORK
+
+      # Step 4: Build app container
+      - name: Build app container
+        run: |
+          # Build the Docker image
+          docker build -t $SAW_TARGET_NAME .
+          ## target name can't have a dash and no spaces!!
+          
+          ### DEBUG ###
+
+      # Step 5: Run app container
+      - name: Run container
+        run: |
+          # Run the Docker container
+          # hostname, network alias set for container to container comms
+
+          ### DEBUG ###
+          echo "docker run --name $SAW_TARGET_NAME \
+            --hostname $SAW_TARGET_NAME \
+            --network $DOCKER_NETWORK \
+            --network-alias $SAW_TARGET_NAME \                                                           
+            -d $SAW_TARGET_NAME"
+          
+          docker run --name $SAW_TARGET_NAME \
+            --hostname $SAW_TARGET_NAME \
+            --network $DOCKER_NETWORK \
+            --network-alias $SAW_TARGET_NAME \
+            -d $SAW_TARGET_NAME
+
+      # Setp 6: Start scanning agent
+      - name: Start Scanning Agent
+        run: |
+          # Using docker agent
+          docker run -d --name probely-agent \
+            --cap-add NET_ADMIN \
+            --network $DOCKER_NETWORK \
+            -e FARCASTER_AGENT_TOKEN=$SAW_AGENT_KEY \
+            --device /dev/net/tun probely/farcaster-onprem-agent:v3
+
+          ### DEBUG ###
+          echo "docker run -d --name probely-agent \
+            --cap-add NET_ADMIN \
+            --network $DOCKER_NETWORK \
+            -e FARCASTER_AGENT_TOKEN=$SAW_AGENT_KEY \
+            --device /dev/net/tun probely/farcaster-onprem-agent:v3"
+            
+      # Step 7: Wait for agent to stat
+      - name: Wait for agent to start
+        run: |
+          # Wait until the probely-agent is ready
+          for i in {1..10}; do
+            echo "-----------------------------------"
+            AGENT_RUNNING=$(docker logs probely-agent | grep 'Running...' | wc -l)
+            if [ $AGENT_RUNNING == "1" ]; then
+              echo "Agent is running!";
+              echo "------------------------"
+              docker logs probely-agent
+              echo "------------------------"
+              sleep 10
+              break;
+            fi
+            sleep 2;
+          done
+
+          ### DEBUG ###
+          docker logs probely-agent
+
+      # Step 8 Test connectivity
+      - name: Install Curl on Farcaster agent and test connectivity
+        run: |
+          docker exec -t probely-agent apt-get update 
+          docker exec -t probely-agent apt-get install curl -y
+
+          ### debug ###
+          echo docker exec -t probely-agent curl $SAW_TARGET_URL -v
+          
+          ### Fail if test is not successful
+          docker exec -t probely-agent curl $SAW_TARGET_URL -v
+          
+      # Step 9: Install Probely CLI
+      - name: Install Probely CLI
+        run: |
+          # echo "probely targets get --api-key $SAW_API_KEY"
+          # Install Probely CLI
+          pip install probely
+
+          ### DEBUG ###
+          probely targets get --api-key $SAW_API_KEY
+      
+      # Step 10: Install Probely CLI & Start Scan
+      - name: Start Scan
+        run: |
+          for i in {1..50}; do
+            echo "-----------------------------------"
+            SCAN_ID=$(probely targets start-scan $SAW_TARGET_ID -o IDS_ONLY --api-key $SAW_API_KEY)
+            echo ${SCAN_ID}
+            if [ -f ${SCAN_ID} ]; then
+              echo "Scan didn't start... Retry start-scan"
+            else
+              echo "Scan started with SCAN ID: ${SCAN_ID}";
+              echo "SCAN_ID=${SCAN_ID}" >> $GITHUB_ENV
+              break;
+            fi
+            sleep 5
+          done
+          if [ -f $SCAN_ID ]; then
+            echo "No Scan ID, aborting..."
+            docker stop $SAW_TARGET_NAME
+            docker stop probely-agent
+            docker rm $SAW_TARGET_NAME
+            docker rm probely-agent
+            docker network rm $DOCKER_NETWORK
+            exit 1
+          fi
+
+      # Step 11: Wait for scan to end
+      - name: Wait for scan to end
+        run: |
+          # Wait until scan ends
+          while true; do
+            echo "-----------------------------------"
+            SCAN_OUTPUT=$(probely scans get ${SCAN_ID} --api-key $SAW_API_KEY | tail -1)
+            echo ${SCAN_OUTPUT}
+            echo "-----------------------------------"
+            SCAN_STATUS=$(probely scans get ${SCAN_ID} --api-key $SAW_API_KEY -o JSON | jq -r '.[0].status')
+            if [ $SCAN_STATUS == "started" ] || [ $SCAN_STATUS == "queued" ]; then
+              echo "Scan is running or queued!";
+            else
+              echo "Scan is not running... finishing"
+              break;
+            fi
+            sleep 30;
+          done
+
+      # Step 12: Update scan labels and logs
+      - name: Update scan labels and logs
+        run: |
+          ## Set Branch name, version
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            BRANCH=${GITHUB_REF##*/}
+          elif [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            BRANCH=$GITHUB_BASE_REF
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            BRANCH=${{ inputs.branch }}
+            VERSION=${{ inputs.release }}
+          fi
+
+          ## Get Date
+          SCAN_DATE=$(date +%Y-%m-%d)
+          
+          ## Debug
+          echo Branch: $BRANCH
+          echo Version: $VERSION
+          echo "Scan date: $SCAN_DATE"
+          
+          ## Get list of finding IDs
+          FINDINGS=$(curl -L "https://api.probely.com/targets/$SAW_TARGET_ID/findings/?scan=$SCAN_ID" \
+           -H "Content-Type: application/json" \
+           -H "Accept: application/json" \
+           -H "Authorization: JWT $SAW_API_KEY" | jq -r '[.results[].id] | join(",")')
+         
+          ## Debug
+          echo "Findings: $FINDINGS"
+
+          ## update FINDING labels and comments
+          curl -X POST -L "https://api.probely.com/targets/$SAW_TARGET_ID/findings/bulk/update/" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -H "Authorization: JWT $SAW_API_KEY" \
+            -d "{
+               \"ids\": [ $FINDINGS ],
+               \"scans\": [ \"$SCAN_ID\" ],
+               \"labels\": [
+                  {
+                    \"name\": \"$BRANCH\",
+                    \"color\": \"#9999ff\"
+                  }
+              ],
+             \"comment\": \"Date $SCAN_DATE, Type: $SAW_SCAN_TYPE, $Branch: $BRANCH, Version: $VERSION, Commit: $HASH, LINK: https://github.com/dainperkins/juice-shop/commit/$HASH\"
+            }"
+
+            ## Debug
+            echo "curl -X POST -L \"https://api.probely.com/targets/$SAW_TARGET_ID/findings/bulk/update/\" \
+            -H \"Content-Type: application/json\" \
+            -H \"Accept: application/json\" \
+            -H \"Authorization: JWT $SAW_API_KEY\" \
+            -d \"{
+               \"ids\": [ $FINDINGS ],
+               \"scans\": [ \"$SCAN_ID\" ],
+               \"labels\": [
+                  {
+                    \"name\": \"$BRANCH\",
+                    \"color\": \"#9999ff\"
+                  }
+              ],
+             \"comment\": \"Date $SCAN_DATE, Type: $SAW_SCAN_TYPE, $Branch: $BRANCH, Version: $VERSION, Commit: $HASH, LINK: https://github.com/dainperkins/juice-shop/commit/$HASH\"
+            }\""
+         
+
+      # Step 13: CI/CD Gating
+      - name: Fail on HIGH vulnerabilities
+        run: |
+          HIGH_VULNS=$(probely scans get ${SCAN_ID} --api-key $SAW_API_KEY -o JSON | jq -r '.[0].highs')
+          echo "HIGH vulnerabilities: ${HIGH_VULNS}"
+          if [ $HIGH_VULNS -gt 0 ]; then
+            echo "Scan has High vulnerabilities"
+            #docker stop $SAW_TARGET_NAME
+            #docker stop probely-agent
+            #docker rm $SAW_TARGET_NAME
+            #docker rm probely-agent
+            #docker network rm $DOCKER_NETWORK
+            #exit 1
+          else
+            echo "Scan doesn't have high vulnerabilities"
+          fi
+          
+      # Step 14: Clean up
+      - name: Clean up Docker resources
+        run: |
+          docker stop $SAW_TARGET_NAME
+          docker stop probely-agent
+          docker rm $SAW_TARGET_NAME
+          docker rm probely-agent
+          docker network rm $DOCKER_NETWORK
