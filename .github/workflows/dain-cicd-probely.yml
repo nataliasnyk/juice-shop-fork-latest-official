@@ -209,24 +209,69 @@ jobs:
             exit 1
           fi
 
-      # Step 11: Wait for scan to end
-      - name: Wait for scan to end
-        run: |
-          # Wait until scan ends
-          while true; do
-            echo "-----------------------------------"
-            SCAN_OUTPUT=$(probely scans get ${SCAN_ID} --api-key $SAW_API_KEY | tail -1)
-            echo ${SCAN_OUTPUT}
-            echo "-----------------------------------"
-            SCAN_STATUS=$(probely scans get ${SCAN_ID} --api-key $SAW_API_KEY -o JSON | jq -r '.[0].status')
-            if [ $SCAN_STATUS == "started" ] || [ $SCAN_STATUS == "queued" ]; then
-              echo "Scan is running or queued!";
-            else
-              echo "Scan is not running... finishing"
-              break;
-            fi
-            sleep 30;
-          done
+    # Step 11: Wait for scan to end
+- name: Wait for scan to end
+  run: |
+    # Initialize variables
+    SLEEP_INTERVAL=30 # seconds
+    ITERATION=0
+    SCAN_STATUS=""
+
+    echo "Starting to monitor Probely scan ID: ${SCAN_ID}"
+    echo "Polling every ${SLEEP_INTERVAL} seconds..."
+    echo "-----------------------------------"
+
+    while true; do
+      ITERATION=$((ITERATION + 1))
+      CURRENT_TIME=$(date "+%Y-%m-%d %H:%M:%S %Z")
+
+      echo "Polling iteration ${ITERATION} at ${CURRENT_TIME}"
+
+      # Fetch full scan information in JSON format
+      # This is more robust than tail -1 and provides richer data
+      PROBELY_SCAN_INFO=$(probely scans get ${SCAN_ID} --api-key "$SAW_API_KEY" -o JSON)
+
+      # Check if PROBELY_SCAN_INFO is empty or not valid JSON
+      if [[ -z "$PROBELY_SCAN_INFO" ]]; then
+        echo "WARNING: No scan information returned from Probely API. Retrying..."
+        SCAN_STATUS="unknown" # Set status to unknown to continue the loop
+      else
+        # Extract status using jq. Add a check for jq parsing errors.
+        SCAN_STATUS=$(echo "${PROBELY_SCAN_INFO}" | jq -r '.[0].status // "error"') # Use // "error" for graceful handling if .status is missing
+        if [ "$?" -ne 0 ]; then
+          echo "ERROR: Failed to parse JSON with jq. Raw API response:"
+          echo "${PROBELY_SCAN_INFO}"
+          SCAN_STATUS="json_parse_error" # Set a specific error status
+        fi
+      fi
+
+      echo "Current Scan Status: ${SCAN_STATUS}"
+
+      # Optionally, echo more details from the scan info for deeper insight
+      # For example, to see the 'progress' or 'details' field if available
+      # echo "Full Scan Details (first 1000 chars):"
+      # echo "${PROBELY_SCAN_INFO}" | head -c 1000
+      # echo "..."
+
+      if [ "$SCAN_STATUS" == "started" ] || [ "$SCAN_STATUS" == "queued" ]; then
+        echo "Scan is still active (${SCAN_STATUS}). Waiting..."
+      elif [ "$SCAN_STATUS" == "unknown" ] || [ "$SCAN_STATUS" == "json_parse_error" ]; then
+        echo "Unable to determine scan status. Will retry."
+      else
+        echo "Scan is no longer active. Final status: ${SCAN_STATUS}"
+        break; # Exit the loop if scan is finished or failed
+      fi
+
+      echo "-----------------------------------"
+      sleep ${SLEEP_INTERVAL};
+    done
+
+    echo "Probely scan monitoring finished. Final scan status: ${SCAN_STATUS}"
+    Optionally, add a check to fail the job if the scan ended in a 'failed' state
+    if [ "$SCAN_STATUS" == "failed" ]; then
+       echo "Error: Probely scan completed with 'failed' status."
+       exit 1
+     fi
 
       # Step 12: Update scan labels and logs
       - name: Update scan labels and logs
