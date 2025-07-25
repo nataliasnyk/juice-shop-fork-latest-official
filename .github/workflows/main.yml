@@ -1,0 +1,90 @@
+# This workflow sets up a temporary ngrok tunnel
+# to expose a service running in the GitHub Actions runner.
+# It's useful for:
+# - Manual testing/demonstration of features during CI.
+# - Debugging applications within the CI environment.
+# - Testing webhooks from external services.
+
+name: Expose Local Service with ngrok
+
+on:
+  # This trigger allows you to manually run the workflow from the 'Actions' tab.
+  # Click 'Run workflow' and select the branch you want to run it on.
+  workflow_dispatch:
+    inputs:
+      port:
+        description: 'Port your local service is listening on'
+        required: true
+        default: '3000' # Change this to your application's default port
+      tunnel_duration_minutes:
+        description: 'How long to keep the ngrok tunnel open (in minutes)'
+        required: true
+        default: '30' # Adjust this based on your testing needs (max for ngrok actions is usually 360 minutes / 6 hours)
+      # New input for the static domain
+      static_domain:
+        description: 'Your reserved ngrok static domain (e.g., your-project.ngrok.app)'
+        required: false # Set to true if you always want to enforce this domain
+        default: 'accepted-optionally-monster.ngrok-free.app' # Your specific static domain
+
+jobs:
+  expose_service:
+    runs-on: ubuntu-latest # Or windows-latest, macos-latest if needed
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # If your app requires the entire history, remove depth: 1
+          # Otherwise, depth: 1 makes checkout faster for CI.
+          depth: 1
+
+      # --- Start of your application setup ---
+      # This section needs to be customized based on your project's technology.
+      # Example: For a Node.js application
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # Or your desired Node.js version
+
+      - name: Install Node.js dependencies
+        run: npm install
+
+      - name: Start your application server in the background
+        # Replace 'npm start' with the command that starts your server.
+        # The '&' character runs the command in the background, allowing the workflow to continue.
+        run: |
+          npm start &
+          # Give your server a moment to fully initialize. Adjust sleep time if needed.
+          echo "Waiting for service to start on port ${{ github.event.inputs.port }}..."
+          sleep 5
+          echo "Service likely started."
+      # --- End of your application setup ---
+
+      - name: Setup ngrok tunnel with static domain
+        uses: sarisia/ngrok-action@v1.3.1
+        with:
+          auth_token: ${{ secrets.NGROK_AUTH_TOKEN }}
+          port: ${{ github.event.inputs.port }}
+          timeout: ${{ github.event.inputs.tunnel_duration_minutes }}
+          # Pass the reserved domain. This input is only honored by ngrok if
+          # your account has access to reserved domains (paid feature).
+          # If github.event.inputs.static_domain is empty, it defaults to a random URL.
+          domain: ${{ github.event.inputs.static_domain }} # This is where your claimed static domain will be used
+
+      - name: Display ngrok public URL
+        id: ngrok_url_step
+        run: |
+          # The ngrok-action exposes the HTTP tunnel URL as an output.
+          # We store it in a job output and also print it to the console.
+          NGROK_URL="${{ steps.ngrok_tunnel.outputs.ngrok_url }}"
+          echo "::notice file=README.md::Your service is publicly accessible via ngrok at: $NGROK_URL"
+          echo "Public ngrok URL: $NGROK_URL"
+          echo "To inspect traffic, visit: http://127.0.0.1:4040 (this URL is only accessible from within the runner or if tunneled further)"
+          echo "ngrok_public_url=$NGROK_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Keep tunnel active for manual inspection/testing
+        run: |
+          echo "Ngrok tunnel active for ${{ github.event.inputs.tunnel_duration_minutes }} minutes."
+          echo "Access your service at: ${{ steps.ngrok_url_step.outputs.ngrok_public_url }}"
+          sleep "${{ github.event.inputs.tunnel_duration_minutes }}m"
+          echo "Tunnel duration finished. Workflow will now complete."
